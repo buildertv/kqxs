@@ -12,7 +12,9 @@ import os
 import json
 import re
 import time
+import argparse
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from unicodedata import normalize as uni_normalize
 
 import requests
@@ -293,26 +295,122 @@ def parse_page(html, date_str):
 
 # ============ LƯU / ĐỌC FILE ============
 
+
+def merge_data(old_data, new_data):
+    """
+    Gộp dữ liệu mới vào dữ liệu cũ.
+    Không xóa kết quả đã có khi nguồn trả về dữ liệu thiếu.
+    """
+
+    if not old_data:
+        return new_data
+
+    merged = json.loads(json.dumps(old_data, ensure_ascii=False))
+
+    old_regions = {
+        region["key"]: region
+        for region in merged.get("regions", [])
+    }
+
+    for new_region in new_data.get("regions", []):
+        key = new_region["key"]
+
+        if key not in old_regions:
+            merged.setdefault("regions", []).append(new_region)
+            old_regions[key] = merged["regions"][-1]
+            continue
+
+        old_region = old_regions[key]
+
+        old_stations = {
+            normalize_name(s["name"]): s
+            for s in old_region.get("stations", [])
+        }
+
+        for new_station in new_region.get("stations", []):
+            station_key = normalize_name(new_station["name"])
+
+            if station_key not in old_stations:
+                old_region["stations"].append(new_station)
+                old_stations[station_key] = new_station
+                continue
+
+            old_station = old_stations[station_key]
+
+            if new_station.get("code"):
+                old_station["code"] = new_station["code"]
+
+            old_prizes = {
+                p["label"]: p
+                for p in old_station.get("prizes", [])
+            }
+
+            for new_prize in new_station.get("prizes", []):
+                label = new_prize["label"]
+                new_numbers = new_prize.get("numbers", [])
+
+                if label not in old_prizes:
+                    old_station["prizes"].append(new_prize)
+                    old_prizes[label] = new_prize
+                    continue
+
+                old_prize = old_prizes[label]
+                old_numbers = old_prize.get("numbers", [])
+
+                # Chỉ cập nhật khi dữ liệu mới không ít hơn dữ liệu cũ
+                if len(new_numbers) >= len(old_numbers) and new_numbers:
+                    old_prize["numbers"] = new_numbers
+
+    return merged
+
+
 def save_json(date_str, data):
     d, m, y = date_str.split("-")
     iso = f"{y}-{m}-{d}"
+
     year_dir = os.path.join(OUTPUT_DIR, y)
     os.makedirs(year_dir, exist_ok=True)
+
     path = os.path.join(year_dir, f"{iso}.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    print(f"✔ Đã lưu: {path}")
-    return path
+
+    old_data = {}
+
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                old_data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            old_data = {}
+
+    merged = merge_data(old_data, data)
+
+    # Không ghi file nếu dữ liệu không thay đổi
+    if merged == old_data:
+        print(f"⏭ Không có thay đổi: {path}")
+        return False
+
+    # Ghi file tạm trước để tránh file JSON bị ghi dở
+    temp_path = path + ".tmp"
+
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump(merged, f, ensure_ascii=False, indent=2)
+
+    os.replace(temp_path, path)
+
+    print(f"✔ Đã cập nhật: {path}")
+    return True
 
 
 def scrape_date(date_str):
     html = fetch_html(date_str)
     data = parse_page(html, date_str)
+
     if not data.get("regions"):
         print(f"⚠ Không parse được dữ liệu cho {date_str}")
-        return None
-    save_json(date_str, data)
-    return data
+        return False
+
+    return save_json(date_str, data)
+
 
 
 def build_index():
@@ -342,25 +440,79 @@ def build_index():
 
 # ============ MAIN ============
 
+VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
+
+
 def main():
-    today = datetime.now()
-    for i in range(0, DAYS_TO_SCRAPE):
-        d = today - timedelta(days=i)
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--today-only",
+        action="store_true",
+        help="Chỉ cập nhật dữ liệu xổ số ngày hôm nay"
+    )
+
+    args = parser.parse_args()
+
+    today = datetime.now(VN_TZ)
+
+    print("=" * 50)
+    print("XSKTVN - SCRAPER")
+    print("Thời gian Việt Nam:", today.strftime("%d/%m/%Y %H:%M:%S"))
+    print("=" * 50)
+
+    data_changed = False
+
+    if args.today_only:
+        # Chạy lặp mỗi phút: luôn lấy lại dữ liệu hôm nay
+        dates_to_scrape = [today]
+
+    else:
+        # Chạy thủ công mặc định: lấy hôm nay và hôm qua
+        dates_to_scrape = [
+            today - timedelta(days=i)
+            for i in range(DAYS_TO_SCRAPE)
+        ]
+
+    for d in dates_to_scrape:
         date_str = d.strftime("%d-%m-%Y")
         iso = d.strftime("%Y-%m-%d")
         year = d.strftime("%Y")
-        path = os.path.join(OUTPUT_DIR, year, f"{iso}.json")
-        if os.path.exists(path):
+
+        path = os.path.join(
+            OUTPUT_DIR,
+            year,
+            f"{iso}.json"
+        )
+
+        # Chỉ bỏ qua file cũ khi chạy chế độ thông thường
+        if not args.today_only and os.path.exists(path):
             print(f"⏭ Đã có: {path} - bỏ qua")
             continue
+
         try:
-            scrape_date(date_str)
-            time.sleep(1.5)
+            changed = scrape_date(date_str)
+
+            if changed:
+                data_changed = True
+
+            time.sleep(1)
+
         except Exception as e:
             print(f"✘ Lỗi ngày {date_str}: {e}")
             time.sleep(3)
 
-    build_index()
+    # Chỉ cập nhật index khi dữ liệu xổ số thay đổi
+    if data_changed:
+        build_index()
+    else:
+        print("Không có dữ liệu mới, giữ nguyên index.json")
+
+    print("=" * 50)
+    print("Hoàn thành:", datetime.now(VN_TZ).strftime("%H:%M:%S"))
+    print("=" * 50)
+
 
 if __name__ == "__main__":
     main()
+
