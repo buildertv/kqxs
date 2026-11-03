@@ -1,20 +1,37 @@
-name: Scrape XSKTVN .....
+
+name: Scrape XSKTVN
 
 on:
   schedule:
-    - cron: "0 12 * * *"   # 19:00 VN
+    # 16:30 - 16:39 giờ Việt Nam
+    - cron: "30 9 * * *"
+
+    # 17:30 - 17:39 giờ Việt Nam
+    - cron: "30 10 * * *"
+
+    # 18:30 - 18:39 giờ Việt Nam
+    - cron: "30 11 * * *"
+
   workflow_dispatch:
 
 permissions:
   contents: write
 
+# Tránh hai tiến trình cùng cập nhật dữ liệu
+concurrency:
+  group: scrape-kqxs
+  cancel-in-progress: false
+
 jobs:
   scrape:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v6
@@ -24,14 +41,42 @@ jobs:
       - name: Cài thư viện
         run: pip install -r requirements.txt
 
-      - name: Chạy scraper
-        run: python scraper.py
-
-      - name: Commit dữ liệu mới
+      - name: Lấy dữ liệu và cập nhật GitHub mỗi phút
+        shell: bash
         run: |
+          set -e
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/
-          git diff --staged --quiet || git commit -m "🤖 Cập nhật KQXS $(date +'%Y-%m-%d')"
-          git pull --rebase origin main || true
-          git push
+
+          for i in $(seq 1 10); do
+            echo "======================================"
+            echo "Lần chạy $i/10 - $(date)"
+            echo "======================================"
+
+            # Lấy kết quả xổ số ngày hôm nay
+            python scraper.py --today-only
+
+            # Chỉ commit nếu dữ liệu thực sự thay đổi
+            git add data/
+
+            if ! git diff --staged --quiet; then
+              git commit -m "🤖 Cập nhật KQXS $(date -u +'%Y-%m-%d %H:%M')"
+
+              # Đồng bộ trước khi push
+              git pull --rebase origin main
+
+              git push origin HEAD:main
+
+              echo "Đã cập nhật dữ liệu lên GitHub."
+            else
+              echo "Không có dữ liệu mới, bỏ qua commit."
+            fi
+
+            # Nghỉ 60 giây trước lần tiếp theo
+            if [ "$i" -lt 10 ]; then
+              sleep 60
+            fi
+          done
+
+          echo "Hoàn thành 10 lần lấy dữ liệu."
