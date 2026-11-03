@@ -41,31 +41,41 @@ jobs:
       - name: Cài thư viện
         run: pip install -r requirements.txt
 
-      - name: Lấy dữ liệu và cập nhật GitHub mỗi phút
+      
+      - name: Lấy dữ liệu và cập nhật GitHub
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -e
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          for i in $(seq 1 10); do
+          # Chạy thủ công: 1 lần
+          # Chạy theo lịch: 10 lần
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            TOTAL=10
+          else
+            TOTAL=1
+          fi
+
+          echo "Sự kiện: $EVENT_NAME"
+          echo "Tổng số lần lấy dữ liệu: $TOTAL"
+
+          for i in $(seq 1 "$TOTAL"); do
             echo "======================================"
-            echo "Lần chạy $i/10 - $(date)"
+            echo "Lần chạy $i/$TOTAL - $(date)"
             echo "======================================"
 
-            # Lấy kết quả xổ số ngày hôm nay
             python scraper.py --today-only
 
-            # Chỉ commit nếu dữ liệu thực sự thay đổi
             git add data/
 
             if ! git diff --staged --quiet; then
               git commit -m "🤖 Cập nhật KQXS $(date -u +'%Y-%m-%d %H:%M')"
 
-              # Đồng bộ trước khi push
               git pull --rebase origin main
-
               git push origin HEAD:main
 
               echo "Đã cập nhật dữ liệu lên GitHub."
@@ -73,10 +83,10 @@ jobs:
               echo "Không có dữ liệu mới, bỏ qua commit."
             fi
 
-            # Nghỉ 60 giây trước lần tiếp theo
-            if [ "$i" -lt 10 ]; then
+            if [ "$i" -lt "$TOTAL" ]; then
               sleep 60
             fi
           done
 
-          echo "Hoàn thành 10 lần lấy dữ liệu."
+          echo "Hoàn thành $TOTAL lần lấy dữ liệu."
+
